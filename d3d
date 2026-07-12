@@ -1,0 +1,111 @@
+from aiogram import Router, F, types
+from aiogram.filters import Command
+from database import register_user, get_user
+from keyboards import get_main_reply_keyboard, get_main_inline_menu, get_back_button
+from config import CURRENCY_NAME, START_BALANCE
+
+router = Router()
+
+@router.message(Command("start"))
+async def cmd_start(message: types.Message):
+    """Обработчик команды /start."""
+    user = message.from_user
+    is_new = await register_user(
+        user_id=user.id,
+        username=user.username,
+        full_name=user.full_name
+    )
+    
+    chat_type = message.chat.type
+    welcome_text = (
+        f"👋 **Приветствуем, {user.full_name}!**\n\n"
+        f"Добро пожаловать в игровой бот с древними духами и внутренней экономикой.\n"
+    )
+    
+    if is_new:
+        welcome_text += f"🎁 В качестве приветственного бонуса вам начислено: **{START_BALANCE} {CURRENCY_NAME}**!\n\n"
+    
+    welcome_text += (
+        "🔮 **Доступные игры и команды:**\n"
+        "• `/zov <ставка>` — сыграть в «Зов Духов» (до 10x!)\n"
+        "• `/pryatki <ставка>` — сыграть в «Прятки с духами» (поле 8x8, до 8x!)\n"
+        "• `/balance` — узнать текущий баланс\n"
+        "• `/bonus` — получить ежедневный бонус\n"
+        "• `/profile` — ваша статистика\n"
+        "• `/top` — рейтинг богатейших игроков\n"
+        "• `/pay @username <сумма>` — перевести монеты\n"
+        "• `/help` — правила игр и информация\n\n"
+        "Выберите действие ниже:"
+    )
+    
+    if chat_type == "private":
+        await message.answer(welcome_text, reply_markup=get_main_reply_keyboard(), parse_mode="Markdown")
+        await message.answer("📌 **Главное меню:**", reply_markup=get_main_inline_menu(), parse_mode="Markdown")
+    else:
+        await message.answer(welcome_text, reply_markup=get_main_inline_menu(), parse_mode="Markdown")
+
+@router.message(Command("menu"))
+async def cmd_menu(message: types.Message):
+    """Показывает главное меню по команде /menu."""
+    await message.answer("📌 **Главное меню бота:**", reply_markup=get_main_inline_menu(), parse_mode="Markdown")
+
+@router.message(Command("help"))
+@router.message(F.text == "❓ Помощь")
+async def cmd_help(message: types.Message):
+    """Показывает справку и правила игр."""
+    help_text = (
+        "📜 **ПРАВИЛА И РУКОВОДСТВО ПО БОТУ**\n\n"
+        "🎲 **Игра «Зов Духов» (/zov или /зов):**\n"
+        "Вы ставите ставку и взываете к древним духам тайги. Исходы:\n"
+        "• 💀 **Дух отвернулся:** ставка проигрывается (0x) — шанс 55%\n"
+        "• 📜 **Дух Амона:** выигрыш 1.5x от ставки — шанс 25%\n"
+        "• 🐉 **Дух Виверны:** выигрыш 2.0x от ставки — шанс 14%\n"
+        "• 🌲 **Дух Тайги:** выигрыш 5.0x от ставки — шанс 5%\n"
+        "• 🦊 **Дух Лисы:** легендарный множитель 10.0x! — шанс ровно 1%\n\n"
+        "🦊 **Игра «Прятки с духами» (/pryatki или /прятки):**\n"
+        "Перед вами появляется скрытое поле 8 на 8 (64 клетки). Вы открываете клетки:\n"
+        "• 🦊 **Лиса:** удваивает текущую выплату (1x ➔ 2x ➔ 4x ➔ 8x победа! Можно найти до 3 лис).\n"
+        "• 🌌 **Космос:** безопасно, игра продолжается без изменений.\n"
+        "• ☀️ **Солнце (Ловушка):** ставка сразу проигрывается.\n"
+        "👉 *В любой момент можно нажать «🛑 Закончить игру» внизу поля и забрать текущую сумму. Но учтите: с каждой найденной Лисой шанс наткнуться на Солнце возрастает!*\n\n"
+        "💰 **Экономика и валюта:**\n"
+        "• Каждые 24 часа доступен `/bonus` (от 200 до 500 монет).\n"
+        "• Перевод валюты: `/pay @username сумма` или ответом на сообщение `/pay сумма`.\n\n"
+        "👥 **Использование в группах:**\n"
+        "Добавьте бота в группу, и все участники смогут играть и соревноваться в общем рейтинге!"
+    )
+    await message.answer(help_text, reply_markup=get_back_button(), parse_mode="Markdown")
+
+@router.callback_query(F.data == "show_help")
+async def cb_help(callback: types.CallbackQuery):
+    """Inline-справка."""
+    help_text = (
+        "📜 **ПРАВИЛА ИГР БОТА**\n\n"
+        "🎲 **Зов Духов (/zov):**\n"
+        "• 💀 Ничего: 0x (55%)\n"
+        "• 📜 Амон: 1.5x (25%)\n"
+        "• 🐉 Виверна: 2.0x (14%)\n"
+        "• 🌲 Тайга: 5.0x (5%)\n"
+        "• 🦊 Лиса: 10.0x (1%)\n\n"
+        "🦊 **Прятки с духами (/pryatki):**\n"
+        "Поле 8x8. Ищите Лисиц (удвоение до 8x!) или безобидный Космос 🌌. Остерегайтесь ловушки Солнца ☀️!\n"
+        "Кнопка *«🛑 Закончить игру»* позволяет в любой момент забрать текущий куш.\n\n"
+        "💰 **Команды экономики:**\n"
+        "• `/bonus` — ежедневный бонус\n"
+        "• `/top` — топ 10 игроков\n"
+        "• `/pay @user сумма` — перевод"
+    )
+    try:
+        await callback.message.edit_text(help_text, reply_markup=get_back_button(), parse_mode="Markdown")
+    except Exception:
+        await callback.message.answer(help_text, reply_markup=get_back_button(), parse_mode="Markdown")
+    await callback.answer()
+
+@router.callback_query(F.data == "back_to_main")
+async def cb_back_to_main(callback: types.CallbackQuery):
+    """Возврат в главное меню через Inline кнопку."""
+    try:
+        await callback.message.edit_text("📌 **Главное меню:**", reply_markup=get_main_inline_menu(), parse_mode="Markdown")
+    except Exception:
+        await callback.message.answer("📌 **Главное меню:**", reply_markup=get_main_inline_menu(), parse_mode="Markdown")
+    await callback.answer()
