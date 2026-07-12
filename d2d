@@ -1,0 +1,58 @@
+import asyncio
+import logging
+from aiogram import Bot, Dispatcher
+from aiogram.types import BotCommand, BotCommandScopeDefault
+from config import BOT_TOKEN
+from database import init_db
+from handlers import start_router, economy_router, zov_router, pryatki_router
+
+# Настройка логирования
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(levelname)s - %(name)s - %(message)s"
+)
+logger = logging.getLogger(__name__)
+
+async def set_bot_commands(bot: Bot):
+    """Установка меню команд в Telegram для удобства пользователей."""
+    commands = [
+        BotCommand(command="zov", description="🎲 Игра «Зов Духов» (до 10x!)"),
+        BotCommand(command="pryatki", description="🦊 Игра «Прятки с духами» (поле 8x8, до 8x!)"),
+        BotCommand(command="menu", description="📌 Главное меню"),
+        BotCommand(command="balance", description="💰 Мой баланс"),
+        BotCommand(command="bonus", description="🎁 Ежедневный бонус"),
+        BotCommand(command="profile", description="👤 Игровой профиль и статистика"),
+        BotCommand(command="top", description="🏆 Рейтинг богатейших игроков"),
+        BotCommand(command="pay", description="🪙 Перевод монет (@username сумма)"),
+        BotCommand(command="help", description="❓ Правила игр и справка")
+    ]
+    await bot.set_my_commands(commands, scope=BotCommandScopeDefault())
+
+async def main():
+    logger.info("Инициализация базы данных...")
+    await init_db()
+    logger.info("База данных успешно инициализирована.")
+
+    # Создание экземпляра бота и диспетчера
+    bot = Bot(token=BOT_TOKEN)
+    dp = Dispatcher()
+
+    # Подключение роутеров обработчиков
+    dp.include_router(start_router)
+    dp.include_router(economy_router)
+    dp.include_router(zov_router)
+    dp.include_router(pryatki_router)
+
+    # Установка подсказок для команд
+    await set_bot_commands(bot)
+
+    logger.info("Запуск Telegram-бота на polling...")
+    # Удаляем вебхук на случай, если он стоял ранее, и запускаем polling
+    await bot.delete_webhook(drop_pending_updates=True)
+    await dp.start_polling(bot)
+
+if __name__ == "__main__":
+    try:
+        asyncio.run(main())
+    except (KeyboardInterrupt, SystemExit):
+        logger.info("Бот остановлен.")
