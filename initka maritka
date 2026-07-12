@@ -1,0 +1,7 @@
+from .start_menu import router as start_router
+from .economy import router as economy_router
+from .game_zov import router as zov_router
+from .game_pryatki import router as pryatki_router
+
+# Экспортируем все роутеры, которые нужно подключить в main.py
+__all__ = ["start_router", "economy_router", "zov_router", "pryatki_router"]
