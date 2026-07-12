@@ -1,0 +1,324 @@
+import random
+import json
+from aiogram import Router, F, types
+from aiogram.filters import Command
+from database import (
+    register_user, get_balance, get_active_pryatki_game,
+    create_pryatki_game, get_pryatki_game, update_pryatki_game_state
+)
+from keyboards import get_pryatki_bet_keyboard, get_pryatki_board_keyboard
+from config import CURRENCY_NAME, PRYATKI_FOX_MULTIPLIERS, PRYATKI_CHANCES
+
+router = Router()
+
+@router.message(Command("pryatki", "прятки"))
+@router.message(F.text == "🦊 Прятки (/pryatki)")
+async def cmd_pryatki_entry(message: types.Message):
+    """Вход в игру Прятки с духами."""
+    user = message.from_user
+    await register_user(user.id, user.username, user.full_name)
+    
+    # Проверяем наличие активной игры
+    active_game = await get_active_pryatki_game(user.id)
+    if active_game:
+        board_list = json.loads(active_game["board"])
+        bet = active_game["foxes_found"] # temporary check
+        foxes = active_game["foxes_found"]
+        bet_amount = active_game["bet"]
+        mult = PRYATKI_FOX_MULTIPLIERS.get(foxes, 1.0)
+        
+        text = (
+            f"📌 **У вас уже есть активная игра в «Прятки с духами»!**\n"
+            f"🪙 Ставка: **{bet_amount:,}** {CURRENCY_NAME}\n"
+            f"🦊 Найденных лис: **{foxes}/3** (множитель: **{mult}x**)\n\n"
+            f"👇 Продолжайте открывать клетки или нажмите «🛑 Закончить игру» внизу поля:"
+        ).replace(",", " ")
+        await message.answer(
+            text,
+            reply_markup=get_pryatki_board_keyboard(active_game["game_id"], board_list, foxes, bet_amount, "active"),
+            parse_mode="Markdown"
+        )
+        return
+
+    balance = await get_balance(user.id)
+    args = message.text.split()
+    
+    # Если аргумент ставки передан сразу (/pryatki 100)
+    if len(args) > 1 and args[0].lower().startswith(("/pryatki", "/прятки")):
+        bet_str = args[1].lower()
+        if bet_str in ["all", "все", "всё", "вабанк", "ва-банк"]:
+            bet = balance
+        else:
+            try:
+                bet = int(bet_str)
+            except ValueError:
+                await message.answer("❌ Ставка должна быть целым числом или `all` (`все`).", parse_mode="Markdown")
+                return
+        
+        await process_pryatki_start(message, user, bet, is_callback=False)
+        return
+
+    # Показываем меню выбора ставки
+    text = (
+        f"🦊 **ИГРА «ПРЯТКИ С ДУХАМИ»** 🔮\n\n"
+        f"Перед вами появится скрытое поле **8 на 8** (64 клетки). Открывайте клетки, чтобы искать Духов Лисы!\n\n"
+        f"📜 **Правила:**\n"
+        f"• 🦊 **Лиса:** ваша текущая выплата удваивается (1x ➔ 2x ➔ 4x ➔ 8x победа! Можно выбить до 3 лис).\n"
+        f"• 🌌 **Космос:** безопасно! Вы не выиграли и не проиграли, продолжаете игру.\n"
+        f"• ☀️ **Солнце (Ловушка):** игра сразу оканчивается, ставка проигрывается.\n\n"
+        f"🛑 **Закончить игру:** вы можете в любой момент нажать кнопку внизу поля и забрать текущий выигрыш!\n"
+        f"⚠️ *Шанс выбить Солнце увеличивается с каждой найденной Лисой!*\n\n"
+        f"💰 **Ваш баланс:** **{balance:,}** {CURRENCY_NAME}\n\n".replace(",", " ") +
+        f"👇 **Выберите или введите вашу ставку:**"
+    )
+    await message.answer(text, reply_markup=get_pryatki_bet_keyboard(balance), parse_mode="Markdown")
+
+@router.callback_query(F.data == "play_pryatki_prompt")
+async def cb_play_pryatki_prompt(callback: types.CallbackQuery):
+    """Показывает меню выбора ставки для игры в Прятки по Inline-кнопке."""
+    user = callback.from_user
+    await register_user(user.id, user.username, user.full_name)
+    
+    active_game = await get_active_pryatki_game(user.id)
+    if active_game:
+        board_list = json.loads(active_game["board"])
+        foxes = active_game["foxes_found"]
+        bet_amount = active_game["bet"]
+        mult = PRYATKI_FOX_MULTIPLIERS.get(foxes, 1.0)
+        text = (
+            f"📌 **У вас уже есть активная игра в «Прятки с духами»!**\n"
+            f"🪙 Ставка: **{bet_amount:,}** {CURRENCY_NAME}\n"
+            f"🦊 Найденных лис: **{foxes}/3** (множитель: **{mult}x**)\n\n"
+            f"👇 Продолжайте открывать клетки или нажмите «🛑 Закончить игру» внизу поля:"
+        ).replace(",", " ")
+        try:
+            await callback.message.edit_text(text, reply_markup=get_pryatki_board_keyboard(active_game["game_id"], board_list, foxes, bet_amount, "active"), parse_mode="Markdown")
+        except Exception:
+            await callback.message.answer(text, reply_markup=get_pryatki_board_keyboard(active_game["game_id"], board_list, foxes, bet_amount, "active"), parse_mode="Markdown")
+        await callback.answer()
+        return
+
+    balance = await get_balance(user.id)
+    text = (
+        f"🦊 **ИГРА «ПРЯТКИ С ДУХАМИ»** 🔮\n\n"
+        f"Поле **8 на 8** (64 клетки). Ищите Лисиц и удваивайте выигрыш до **8x**!\n"
+        f"Каждая Лиса удваивает ставку, но также повышает шанс наткнуться на ловушку Солнца ☀️.\n\n"
+        f"💰 **Ваш баланс:** **{balance:,}** {CURRENCY_NAME}\n\n".replace(",", " ") +
+        f"👇 **Выберите ставку ниже:**"
+    )
+    try:
+        await callback.message.edit_text(text, reply_markup=get_pryatki_bet_keyboard(balance), parse_mode="Markdown")
+    except Exception:
+        await callback.message.answer(text, reply_markup=get_pryatki_bet_keyboard(balance), parse_mode="Markdown")
+    await callback.answer()
+
+@router.callback_query(F.data.startswith("pry_bet:"))
+async def cb_pryatki_bet(callback: types.CallbackQuery):
+    """Обработка выбора конкретной ставки из меню или при рестарте."""
+    user = callback.from_user
+    await register_user(user.id, user.username, user.full_name)
+    balance = await get_balance(user.id)
+    
+    bet_param = callback.data.split(":")[1]
+    if bet_param == "all":
+        bet = balance
+    else:
+        try:
+            bet = int(bet_param)
+        except ValueError:
+            await callback.answer("❌ Некорректная ставка.", show_alert=True)
+            return
+
+    await process_pryatki_start(callback.message, user, bet, is_callback=True, callback_query=callback)
+
+async def process_pryatki_start(message_obj: types.Message, user: types.User, bet: int, is_callback: bool = False, callback_query: types.CallbackQuery = None):
+    """Запуск партии в Прятки: списываем ставку, создаем поле 8x8 и высылаем кнопки."""
+    balance = await get_balance(user.id)
+    
+    if bet <= 0:
+        err_msg = "❌ Ставка должна быть больше 0 монет!"
+        if is_callback and callback_query:
+            await callback_query.answer(err_msg, show_alert=True)
+        else:
+            await message_obj.answer(err_msg)
+        return
+
+    if bet > balance:
+        err_msg = f"⚠️ Недостаточно монет на балансе! У вас есть только {balance:,} {CURRENCY_NAME}".replace(",", " ")
+        if is_callback and callback_query:
+            await callback_query.answer(err_msg, show_alert=True)
+        else:
+            await message_obj.answer(err_msg)
+        return
+
+    active_game = await get_active_pryatki_game(user.id)
+    if active_game:
+        err_msg = "📌 У вас уже есть активная игра! Сначала завершите её."
+        if is_callback and callback_query:
+            await callback_query.answer(err_msg, show_alert=True)
+        else:
+            await message_obj.answer(err_msg)
+        return
+
+    # Создаем игру в базе данных
+    game_id = await create_pryatki_game(user.id, bet)
+    board_list = ["?"] * 64
+    
+    text = (
+        f"🦊 **ИГРА «ПРЯТКИ С ДУХАМИ»** 🔮\n"
+        f"🪙 Ставка: **{bet:,}** {CURRENCY_NAME}\n\n".replace(",", " ") +
+        f"🔎 **Поле 8 на 8:** Нажимайте на клетки `❓`!\n"
+        f"• 🦊 **Лиса (0/3):** множитель **1.0x** (следующая удвоит до **2.0x**!)\n"
+        f"• ☀️ **Солнце:** опасность **22%**\n\n"
+        f"👇 *Открывайте клетки или нажмите «🛑 Закончить игру (Забрать {bet:,} 🪙)» внизу поля.*".replace(",", " ")
+    )
+    
+    reply_markup = get_pryatki_board_keyboard(game_id, board_list, 0, bet, "active")
+    
+    if is_callback and callback_query:
+        try:
+            await callback_query.message.edit_text(text, reply_markup=reply_markup, parse_mode="Markdown")
+        except Exception:
+            await callback_query.message.answer(text, reply_markup=reply_markup, parse_mode="Markdown")
+        await callback_query.answer()
+    else:
+        await message_obj.answer(text, reply_markup=reply_markup, parse_mode="Markdown")
+
+@router.callback_query(F.data == "noop")
+async def cb_noop(callback: types.CallbackQuery):
+    await callback.answer()
+
+@router.callback_query(F.data.startswith("pry_c:"))
+async def cb_pryatki_cell(callback: types.CallbackQuery):
+    """Обработка нажатия на неизвестную клетку на поле 8x8."""
+    user = callback.from_user
+    parts = callback.data.split(":")
+    game_id = int(parts[1])
+    cell_idx = int(parts[2])
+    
+    game = await get_pryatki_game(game_id)
+    if not game or game["status"] != "active":
+        await callback.answer("Эта игра уже завершена!", show_alert=True)
+        return
+        
+    if game["user_id"] != user.id:
+        await callback.answer("❌ Это не ваша игра! Откройте свою через команду /pryatki", show_alert=True)
+        return
+        
+    board_list = json.loads(game["board"])
+    if board_list[cell_idx] != "?":
+        await callback.answer("Эта клетка уже открыта!", show_alert=True)
+        return
+        
+    foxes_found = game["foxes_found"]
+    bet = game["bet"]
+    
+    # Определяем шанс в зависимости от уже найденного количества лис
+    chances = PRYATKI_CHANCES.get(foxes_found, {"space": 38.0, "sun": 50.0, "fox": 12.0})
+    weights = [chances["space"], chances["sun"], chances["fox"]]
+    outcome = random.choices(["space", "sun", "fox"], weights=weights, k=1)[0]
+    
+    board_list[cell_idx] = outcome
+    
+    if outcome == "space":
+        # 🌌 Космос: безопасно, продолжаем
+        await update_pryatki_game_state(game_id, user.id, board_list, foxes_found, "active")
+        current_mult = PRYATKI_FOX_MULTIPLIERS.get(foxes_found, 1.0)
+        current_win = int(bet * current_mult)
+        
+        text = (
+            f"🦊 **ИГРА «ПРЯТКИ С ДУХАМИ»** 🔮\n"
+            f"🪙 Ставка: **{bet:,}** {CURRENCY_NAME}\n\n".replace(",", " ") +
+            f"🌌 **Выпал КОСМОС!** Вы в безопасности.\n"
+            f"Текущая выплата: **{current_win:,}** {CURRENCY_NAME} (множитель **{current_mult}x**)\n"
+            f"🦊 Найденных лис: **{foxes_found}/3**\n\n"
+            f"👇 Ищите дальше или заберите выигрыш кнопкой внизу:"
+        ).replace(",", " ")
+        
+        await callback.message.edit_text(text, reply_markup=get_pryatki_board_keyboard(game_id, board_list, foxes_found, bet, "active"), parse_mode="Markdown")
+        await callback.answer("🌌 Космос! Безопасно.")
+        
+    elif outcome == "fox":
+        # 🦊 Лиса: удваиваем выигрыш!
+        new_foxes = foxes_found + 1
+        if new_foxes >= 3:
+            # Нашли все 3 лисы! Победа с максимальным множителем 8x
+            win_amount = int(bet * PRYATKI_FOX_MULTIPLIERS[3])
+            await update_pryatki_game_state(game_id, user.id, board_list, new_foxes, "won", win_amount)
+            new_balance = await get_balance(user.id)
+            
+            text = (
+                f"🎉 **НЕВЕРОЯТНАЯ ПОБЕДА!** 🦊🦊🦊\n"
+                f"Вы нашли всех трёх Духов Лисы на поле!\n\n"
+                f"📈 Итоговый множитель: **8.0x**\n"
+                f"🪙 Ставка: **{bet:,}** {CURRENCY_NAME}\n".replace(",", " ") +
+                f"🏆 Выигрыш: **+{win_amount:,}** {CURRENCY_NAME}!\n".replace(",", " ") +
+                f"💰 Новый баланс: **{new_balance:,}** {CURRENCY_NAME}".replace(",", " ")
+            )
+            await callback.message.edit_text(text, reply_markup=get_pryatki_board_keyboard(game_id, board_list, new_foxes, bet, "won"), parse_mode="Markdown")
+            await callback.answer("🎉 Вы нашли 3-ю Лису! Джекпот 8x!", show_alert=True)
+        else:
+            await update_pryatki_game_state(game_id, user.id, board_list, new_foxes, "active")
+            current_mult = PRYATKI_FOX_MULTIPLIERS[new_foxes]
+            current_win = int(bet * current_mult)
+            sun_chance = PRYATKI_CHANCES.get(new_foxes, {"sun": 50.0})["sun"]
+            
+            text = (
+                f"🦊 **ДУХ ЛИСЫ НАЙДЕН! ({new_foxes}/3)** ✨\n"
+                f"📈 Ваша выплата удваивается: **{current_mult}x**\n"
+                f"💰 Потенциальный выигрыш: **{current_win:,}** {CURRENCY_NAME}\n\n".replace(",", " ") +
+                f"⚠️ **Внимание:** риск наткнуться на ловушку Солнца возрос до **{sun_chance}%**!\n\n"
+                f"👇 Продолжайте открывать клетки или нажмите «🛑 Закончить игру (Забрать {current_win:,} 🪙)» внизу:".replace(",", " ")
+            )
+            await callback.message.edit_text(text, reply_markup=get_pryatki_board_keyboard(game_id, board_list, new_foxes, bet, "active"), parse_mode="Markdown")
+            await callback.answer(f"🦊 Лиса найдена! Множитель {current_mult}x!", show_alert=True)
+            
+    elif outcome == "sun":
+        # ☀️ Солнце: Ловушка! Игра проиграна
+        await update_pryatki_game_state(game_id, user.id, board_list, foxes_found, "lost", 0)
+        new_balance = await get_balance(user.id)
+        
+        text = (
+            f"☀️ **ЛОВУШКА СОЛНЦА!** 💀\n"
+            f"Вы кликнули на клетку, где пряталось ослепительное Солнце. Духи отвернулись от вас.\n\n"
+            f"📉 Игра окончена. Ставка **-{bet:,}** {CURRENCY_NAME} сгорела.\n".replace(",", " ") +
+            f"💰 Новый баланс: **{new_balance:,}** {CURRENCY_NAME}".replace(",", " ")
+        )
+        await callback.message.edit_text(text, reply_markup=get_pryatki_board_keyboard(game_id, board_list, foxes_found, bet, "lost"), parse_mode="Markdown")
+        await callback.answer("☀️ Ловушка Солнца! Игра проиграна.", show_alert=True)
+
+@router.callback_query(F.data.startswith("pry_cash:"))
+async def cb_pryatki_cashout(callback: types.CallbackQuery):
+    """Нажатие на кнопку «Закончить игру (Забрать выигрыш/ставку)»."""
+    user = callback.from_user
+    game_id = int(callback.data.split(":")[1])
+    
+    game = await get_pryatki_game(game_id)
+    if not game or game["status"] != "active":
+        await callback.answer("Эта игра уже завершена!", show_alert=True)
+        return
+        
+    if game["user_id"] != user.id:
+        await callback.answer("❌ Это не ваша игра!", show_alert=True)
+        return
+        
+    foxes_found = game["foxes_found"]
+    bet = game["bet"]
+    current_mult = PRYATKI_FOX_MULTIPLIERS.get(foxes_found, 1.0)
+    win_amount = int(bet * current_mult)
+    board_list = json.loads(game["board"])
+    
+    await update_pryatki_game_state(game_id, user.id, board_list, foxes_found, "cashed_out", win_amount)
+    new_balance = await get_balance(user.id)
+    
+    text = (
+        f"🛑 **ИГРА ЗАВЕРШЕНА ДОСРОЧНО**\n\n"
+        f"Вы решили вовремя остановиться и забрать текущий куш!\n"
+        f"🦊 Найденных лис: **{foxes_found}/3**\n"
+        f"📈 Множитель: **{current_mult}x**\n"
+        f"🏆 Зачислено: **+{win_amount:,}** {CURRENCY_NAME}\n\n".replace(",", " ") +
+        f"💰 Ваш баланс: **{new_balance:,}** {CURRENCY_NAME}".replace(",", " ")
+    )
+    
+    await callback.message.edit_text(text, reply_markup=get_pryatki_board_keyboard(game_id, board_list, foxes_found, bet, "cashed_out"), parse_mode="Markdown")
+    await callback.answer(f"🎉 Вы успешно забрали {win_amount:,} монет!".replace(",", " "), show_alert=True)
