@@ -1,0 +1,164 @@
+import random
+from aiogram import Router, F, types
+from aiogram.filters import Command
+from database import register_user, get_balance, record_game
+from keyboards import get_zov_bet_keyboard, get_after_game_keyboard, get_back_button
+from config import CURRENCY_NAME, ZOV_CHANCES
+
+router = Router()
+
+@router.message(Command("zov", "зов"))
+@router.message(F.text == "🎲 Зов Духов (/zov)")
+@router.message(F.text == "🎲 Игры (/zov)")
+async def cmd_zov_entry(message: types.Message):
+    """
+    Вход в игру «Зов Духов».
+    Если указана ставка (/zov 100), запускаем игру сразу.
+    Если без аргументов (/zov или кнопка в меню) — показываем клавиатуру выбора ставки.
+    """
+    user = message.from_user
+    await register_user(user.id, user.username, user.full_name)
+    balance = await get_balance(user.id)
+    
+    args = message.text.split()
+    # Если команда вызвана с аргументом ставки (например, /zov 100 или /zov all)
+    if len(args) > 1 and args[0].lower().startswith(("/zov", "/зов")):
+        bet_str = args[1].lower()
+        if bet_str in ["all", "все", "всё", "вабанк", "ва-банк"]:
+            bet = balance
+        else:
+            try:
+                bet = int(bet_str)
+            except ValueError:
+                await message.answer("❌ Ставка должна быть целым числом или `all` (`все`).", parse_mode="Markdown")
+                return
+        
+        await process_zov_game(message, user, bet, is_callback=False)
+        return
+
+    # Если без аргументов — показываем красивое меню с кнопками ставок
+    text = (
+        f"🌲 **ИГРА «ЗОВ ДУХОВ»** 🔮\n\n"
+        f"Вы взываете к древним духам тайги. Ваша ставка может как раствориться, так и преумножиться до **10x**!\n\n"
+        f"📊 **Возможные отклики духов:**\n"
+        f"• 💀 **Ничего:** 0x — шанс 55% (ставка проигрывается)\n"
+        f"• 📜 **Дух Амона:** 1.5x — шанс 25%\n"
+        f"• 🐉 **Дух Виверны:** 2.0x — шанс 14%\n"
+        f"• 🌲 **Дух Тайги:** 5.0x — шанс 5%\n"
+        f"• 🦊 **Дух Лисы:** 10.0x — шанс ровно 1%!\n\n"
+        f"💰 **Ваш баланс:** **{balance:,}** {CURRENCY_NAME}\n\n".replace(",", " ") +
+        f"👇 **Выберите или введите вашу ставку:**\n*(Или напишите команду `/zov <ставка>` в чат)*"
+    )
+    await message.answer(text, reply_markup=get_zov_bet_keyboard(balance), parse_mode="Markdown")
+
+@router.callback_query(F.data == "play_zov_prompt")
+async def cb_play_zov_prompt(callback: types.CallbackQuery):
+    """Показывает меню выбора ставки по Inline-кнопке."""
+    user = callback.from_user
+    await register_user(user.id, user.username, user.full_name)
+    balance = await get_balance(user.id)
+    
+    text = (
+        f"🌲 **ИГРА «ЗОВ ДУХОВ»** 🔮\n\n"
+        f"Вы взываете к древним духам тайги. Ваша ставка может как раствориться, так и преумножиться до **10x**!\n\n"
+        f"📊 **Возможные отклики духов:**\n"
+        f"• 💀 **Ничего:** 0x — шанс 55% (ставка проигрывается)\n"
+        f"• 📜 **Дух Амона:** 1.5x — шанс 25%\n"
+        f"• 🐉 **Дух Виверны:** 2.0x — шанс 14%\n"
+        f"• 🌲 **Дух Тайги:** 5.0x — шанс 5%\n"
+        f"• 🦊 **Дух Лисы:** 10.0x — шанс ровно 1%!\n\n"
+        f"💰 **Ваш баланс:** **{balance:,}** {CURRENCY_NAME}\n\n".replace(",", " ") +
+        f"👇 **Выберите ставку ниже:**"
+    )
+    try:
+        await callback.message.edit_text(text, reply_markup=get_zov_bet_keyboard(balance), parse_mode="Markdown")
+    except Exception:
+        await callback.message.answer(text, reply_markup=get_zov_bet_keyboard(balance), parse_mode="Markdown")
+    await callback.answer()
+
+@router.callback_query(F.data.startswith("zov_bet:"))
+async def cb_zov_bet(callback: types.CallbackQuery):
+    """Обработка нажатия на кнопку со ставкой (например, 100 или all)."""
+    user = callback.from_user
+    await register_user(user.id, user.username, user.full_name)
+    balance = await get_balance(user.id)
+    
+    bet_param = callback.data.split(":")[1]
+    if bet_param == "all":
+        bet = balance
+    else:
+        try:
+            bet = int(bet_param)
+        except ValueError:
+            await callback.answer("❌ Некорректная ставка.", show_alert=True)
+            return
+
+    await process_zov_game(callback.message, user, bet, is_callback=True, callback_query=callback)
+
+@router.callback_query(F.data == "no_balance")
+async def cb_no_balance(callback: types.CallbackQuery):
+    await callback.answer("❌ У вас 0 монет! Получите ежедневный бонус через /bonus.", show_alert=True)
+
+async def process_zov_game(message_obj: types.Message, user: types.User, bet: int, is_callback: bool = False, callback_query: types.CallbackQuery = None):
+    """Ядро игровой логики: проверка баланса, бросок костей/выбор шанса, начисление выигрыша."""
+    balance = await get_balance(user.id)
+    
+    # Проверки корректности ставки
+    if bet <= 0:
+        err_msg = "❌ Ставка должна быть больше 0 монет!"
+        if is_callback and callback_query:
+            await callback_query.answer(err_msg, show_alert=True)
+        else:
+            await message_obj.answer(err_msg)
+        return
+
+    if bet > balance:
+        err_msg = f"⚠️ Недостаточно монет на балансе! У вас есть только {balance:,} {CURRENCY_NAME}".replace(",", " ")
+        if is_callback and callback_query:
+            await callback_query.answer(err_msg, show_alert=True)
+        else:
+            await message_obj.answer(err_msg)
+        return
+
+    # Выбор исхода на основе точных весов, заданных пользователем
+    weights = [outcome["weight"] for outcome in ZOV_CHANCES]
+    chosen_outcome = random.choices(ZOV_CHANCES, weights=weights, k=1)[0]
+    
+    multiplier = chosen_outcome["multiplier"]
+    win_amount = int(bet * multiplier)
+    
+    # Записываем результат в базу и получаем обновленный баланс
+    new_balance = await record_game(user.id, bet, multiplier, win_amount)
+    
+    # Формируем красивый результат игры
+    if multiplier > 0:
+        result_text = (
+            f"🔮 **Игрок {user.full_name} взывает к духам...**\n"
+            f"🪙 Ставка: **{bet:,}** {CURRENCY_NAME}\n\n".replace(",", " ") +
+            f"{chosen_outcome['emoji']} **ОТКЛИК ДУХА:**\n"
+            f"✨ **{chosen_outcome['name']} услышал ваш зов!**\n"
+            f"📈 Множитель: **{multiplier}x**\n\n"
+            f"🎉 **ПОБЕДА! Вы выиграли: +{win_amount:,} {CURRENCY_NAME}!**\n".replace(",", " ") +
+            f"💰 Новый баланс: **{new_balance:,}** {CURRENCY_NAME}".replace(",", " ")
+        )
+    else:
+        result_text = (
+            f"🔮 **Игрок {user.full_name} взывает к духам...**\n"
+            f"🪙 Ставка: **{bet:,}** {CURRENCY_NAME}\n\n".replace(",", " ") +
+            f"{chosen_outcome['emoji']} **ОТКЛИК ДУХА:**\n"
+            f"💀 **{chosen_outcome['name']}**\n"
+            f"Увы, туман рассеялся и духи отвернулись от вас. Ставка уходит в бездну...\n\n"
+            f"📉 **ПОРАЖЕНИЕ! Вы потеряли: -{bet:,} {CURRENCY_NAME}**\n".replace(",", " ") +
+            f"💰 Новый баланс: **{new_balance:,}** {CURRENCY_NAME}".replace(",", " ")
+        )
+        
+    reply_markup = get_after_game_keyboard(last_bet=bet)
+    
+    if is_callback and callback_query:
+        try:
+            await callback_query.message.edit_text(result_text, reply_markup=reply_markup, parse_mode="Markdown")
+        except Exception:
+            await callback_query.message.answer(result_text, reply_markup=reply_markup, parse_mode="Markdown")
+        await callback_query.answer()
+    else:
+        await message_obj.answer(result_text, reply_markup=reply_markup, parse_mode="Markdown")
