@@ -1,116 +1,74 @@
-import telebot
-from telebot import types
+ import asyncio
 import random
-import json
+import logging
+from aiogram import Bot, Dispatcher, types, F
+from aiogram.filters import Command
+from aiogram.types import ReplyKeyboardMarkup, KeyboardButton
 import os
-from dotenv import load_dotenv
 
-load_dotenv()
+logging.basicConfig(level=logging.INFO)
 
-TOKEN = os.getenv("BOT_TOKEN")
-if not TOKEN:
-    raise ValueError("Не задан BOT_TOKEN! Проверьте переменные окружения.")
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+if not BOT_TOKEN:
+    raise RuntimeError("Не задан BOT_TOKEN в переменных окружения!")
 
-bot = telebot.TeleBot(TOKEN)
-DB_FILE = "users_balance.json"
+# Баланс в памяти (сбросится при полном рестарте сервера, но для старта идеально)
+user_balances = {}
 
-def load_balances():
-    if not os.path.exists(DB_FILE):
-        return {}
-    try:
-        with open(DB_FILE, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except Exception:
-        return {}
+def get_or_create_balance(user_id: int) -> int:
+    if user_id not in user_balances:
+        user_balances[user_id] = 1000
+    return user_balances[user_id]
 
-def save_balances(data):
-    with open(DB_FILE, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
+def change_balance(user_id: int, delta: int) -> int:
+    current = get_or_create_balance(user_id)
+    new_balance = current + delta
+    if new_balance < 0:
+        return current
+    user_balances[user_id] = new_balance
+    return new_balance
 
-balances = load_balances()
+SPIRITS = [
+    {"name": "Ничего", "multiplier": 0.0},
+    {"name": "Дух Амона", "multiplier": 1.5},
+    {"name": "Дух Виверны", "multiplier": 2.0},
+    {"name": "Дух Тайги", "multiplier": 5.0},
+    {"name": "Дух Лисы", "multiplier": 10.0},
+]
+WEIGHTS = [60, 25, 10, 4, 1]
 
-def get_balance(user_id: int) -> int:
-    return balances.get(str(user_id), 100)
+async def roll_spirit():
+    return random.choices(SPIRITS, weights=WEIGHTS, k=1)[0]
 
-def set_balance(user_id: int, amount: int):
-    balances[str(user_id)] = amount
-    save_balances(balances)
+def get_main_keyboard() -> ReplyKeyboardMarkup:
+    kb = [
+        [KeyboardButton(text="💰 Баланс"), KeyboardButton(text="🎲 /зов ставка")]
+    ]
+    return ReplyKeyboardMarkup(keyboard=kb, resize_keyboard=True)
 
-def add_balance(user_id: int, amount: int):
-    current = get_balance(user_id)
-    set_balance(user_id, current + amount)
-
-# Шансы: 0x — 60%, 1x — 25%, 1.5x — 10%, 2x — 4%, 5x — 1%
-def roll_multiplier():
-    options = [0, 1, 1.5, 2, 5]
-    weights = [60, 25, 10, 4, 1]
-    return random.choices(options, weights=weights, k=1)[0]
-
-@bot.message_handler(commands=["start"])
-def cmd_start(message):
-    user_id = message.from_user.id
-    if str(user_id) not in balances:
-        balances[str(user_id)] = 100
-        save_balances(balances)
-    markup = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
-    btn1 = types.KeyboardButton("💰 Мой баланс")
-    btn2 = types.KeyboardButton("🎲 Ставка (/зов)")
-    btn3 = types.KeyboardButton("❓ Помощь")
-    markup.add(btn1, btn2, btn3)
-    bot.send_message(
-        message.chat.id,
-        f"Привет, {message.from_user.first_name}!\n"
-        "У тебя есть внутренняя валюта. Попробуй ставку или проверь баланс.",
-        reply_markup=markup
+async def cmd_start(message: types.Message):
+    await message.answer(
+        f"Привет, {message.from_user.first_name}! 🎉\n"
+        "Это игровой бот с внутренней валютой.\n"
+        "Нажми кнопки ниже или используй команды.",
+        reply_markup=get_main_keyboard()
     )
 
-@bot.message_handler(commands=["зов"])
-def cmd_zov(message):
-    play_game(message)
+async def show_balance(message: types.Message):
+    balance = get_or_create_balance(message.from_user.id)
+    await message.answer(f"Твой баланс: {balance} монет 🪙")
 
-@bot.message_handler(func=lambda m: m.text == "🎲 Ставка (/зов)")
-def handle_bet_btn(message):
-    play_game(message)
-
-def play_game(message):
+async def cmd_roll(message: types.Message):
     user_id = message.from_user.id
-    cost = 10
-    balance = get_balance(user_id)
+    cost = 100
 
+    balance = get_or_create_balance(user_id)
     if balance < cost:
-        bot.send_message(message.chat.id, f"Недостаточно валюты! Твой баланс: {balance}. Нужно минимум {cost}.")
+        await message.answer(
+            f"Недостаточно средств! Твой баланс: {balance} монет."
+        )
         return
 
-    set_balance(user_id, balance - cost)
-    multiplier = roll_multiplier()
-    win_amount = int(cost * multiplier)
-
-    if multiplier == 0:
-        text = f"😕 Увы, ты ничего не выиграл. Множитель: {multiplier}x. Твой баланс: {get_balance(user_id)}"
-    else:
-        add_balance(user_id, win_amount)
-        text = (f"🎉 Победа! Множитель: {multiplier}x\n"
-                f"Ты выиграл {win_amount} валюты.\n"
-                f"Твой баланс: {get_balance(user_id)}")
-
-    bot.send_message(message.chat.id, text)
-
-@bot.message_handler(func=lambda m: m.text == "💰 Мой баланс")
-def handle_balance(message):
-    user_id = message.from_user.id
-    bot.send_message(message.chat.id, f"Твой баланс: {get_balance(user_id)} валюты.")
-
-@bot.message_handler(func=lambda m: m.text == "❓ Помощь")
-def handle_help(message):
-    bot.send_message(
-        message.chat.id,
-        "Команды:\n"
-        "/start — запустить бота и получить стартовый баланс\n"
-        "/зов или кнопка «Ставка» — сделать ставку (стоит 10 валюты)\n"
-        "💰 Мой баланс — посмотреть текущий баланс\n"
-        "❓ Помощь — показать это меню"
-    )
-
-if __name__ == "__main__":
-    print("Бот запущен...")
-    bot.infinity_polling()
+    change_balance(user_id,
+   
+ 
